@@ -1,0 +1,1753 @@
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import AppLayout from '@/layouts/app-layout';
+import { canDelete, canGeneratePayroll } from '@/lib/auth';
+import { Head, Link, router, usePage } from '@inertiajs/react';
+import { ArrowLeft, CheckCircle, Trash2 } from 'lucide-react';
+import { useEffect } from 'react';
+import { toast } from 'sonner';
+
+interface Employee {
+    id: number;
+    employee_number: string;
+    first_name: string;
+    last_name: string;
+    basic_rate: string;
+    rate_type: string;
+    allowance: string;
+}
+
+interface Attendance {
+    id: number;
+    date: string;
+    clock_in: string;
+    clock_out: string;
+    hours_worked: number;
+    late_minutes: number;
+    overtime_hours: number;
+    overtime_type: string;
+    is_ot_paid: boolean;
+    night_diff_hours: number;
+    is_holiday: boolean;
+    holiday_type: string | null;
+    is_restday: boolean;
+    remarks: string | null;
+}
+
+interface Payroll {
+    id: number;
+    payroll_period: string;
+    month: string;
+    year: number;
+    status: string;
+    total_employees: number;
+    apply_deductions: boolean;
+    created_at: string;
+    uploaded_by: {
+        name: string;
+    };
+}
+
+interface Props {
+    payroll: Payroll;
+    computedPayrollItems?: Array<{
+        employee: Employee;
+        attendances: Attendance[];
+        payroll: any; // Pre-computed payroll data from backend
+        loan_deduction: number;
+        scheduled_working_days: number;
+        actual_working_days: number;
+        absent_days: number;
+    }>;
+}
+
+export default function PayrollShowDraft({
+    payroll,
+    computedPayrollItems,
+}: Props) {
+    console.log('Computed Payroll Items:', computedPayrollItems);
+    const { flash } = usePage().props as any;
+
+    const breadcrumbs = [
+        { title: 'Payroll', href: '/payroll' },
+        {
+            title: `${payroll.payroll_period} - ${payroll.month} ${payroll.year}`,
+            href: `/payroll/${payroll.id}`,
+        },
+    ];
+
+    const applyStatutoryDeductions = payroll.apply_deductions;
+
+    // Show flash messages
+    useEffect(() => {
+        if (flash?.success) {
+            toast.success(flash.success);
+        }
+        if (flash?.error) {
+            toast.error(flash.error);
+        }
+        if (flash?.warning) {
+            toast.warning(flash.warning);
+        }
+    }, [flash]);
+
+    const handleGenerate = () => {
+        // console.log('Generate clicked, attendanceArray:', attendanceArray);
+        // console.log('premiumSettings:', premiumSettings);
+
+        if (attendanceArray.length === 0) {
+            toast.error(
+                'No DTR records found for this payroll. Please upload a DTR file for this period before generating.',
+            );
+            return;
+        }
+
+        // Ensure DTR dates match the payroll's month/year
+        try {
+            const payrollYear = payroll.year; // Already a number
+            const payrollMonthName = payroll.month; // e.g. "October"
+            const payrollMonthIndex = new Date(
+                `${payrollMonthName} 1, ${payrollYear}`,
+            ).getMonth(); // 0-based
+
+            let hasMatchingMonth = false;
+
+            attendanceArray.forEach((item) => {
+                (item.attendances || []).forEach((att: any) => {
+                    const d = new Date(att.date);
+                    if (
+                        !Number.isNaN(d.getTime()) &&
+                        d.getFullYear() === payrollYear &&
+                        d.getMonth() === payrollMonthIndex
+                    ) {
+                        hasMatchingMonth = true;
+                    }
+                });
+            });
+
+            if (!hasMatchingMonth) {
+                toast.error(
+                    `The uploaded DTR dates do not match this payroll month (${payroll.month} ${payroll.year}). Please upload a DTR for the correct month.`,
+                );
+                return;
+            }
+        } catch (e) {
+            console.log(e);
+            // If something goes wrong with date parsing, fail safe and let backend handle it
+        }
+
+        if (
+            confirm(
+                'Submit payroll from attendance records? This will compute all earnings and deductions.',
+            )
+        ) {
+            // Calculate payroll for all employees and send the computed data
+            const snapshotRows: any[] = [];
+            // console.log(attendanceArray);
+            const payrollItems = attendanceArray.map((item) => {
+                const computed = calculatePayroll(
+                    item.employee,
+                    item.attendances,
+                    item.loan_deduction || 0,
+                    item.scheduled_working_days || 0,
+                    item.absent_days || 0,
+                );
+
+                // Store full row snapshot for later viewing without recalculation
+                snapshotRows.push({
+                    employee: item.employee,
+                    payroll: computed,
+                });
+
+                return {
+                    employee_id: item.employee.id,
+                    basic_pay: parseFloat(computed.basicPay),
+                    restday_pay: parseFloat(computed.restdayPay),
+                    allowance_pay:
+                        parseFloat(computed.regularAllowance) +
+                        parseFloat(computed.restdayAllowance),
+                    regular_allowance: parseFloat(computed.regularAllowance),
+                    restday_allowance: parseFloat(computed.restdayAllowance),
+                    gross_pay: parseFloat(computed.totalPay),
+                    sss_deduction: parseFloat(computed.sssDeduction),
+                    phic_deduction: parseFloat(computed.phicDeduction),
+                    hdmf_deduction: parseFloat(computed.hdmfDeduction),
+                    tax_deduction: parseFloat(computed.taxDeduction),
+                    late_deduction: parseFloat(computed.lateDeduction || '0'),
+                    absence_deduction: parseFloat(
+                        computed.absenceDeduction || '0',
+                    ),
+                    loan_deduction: parseFloat(computed.loanDeduction),
+                    total_deductions: parseFloat(computed.totalDeductions),
+                    net_pay: parseFloat(computed.netPay),
+                    hours_worked:
+                        parseFloat(computed.regularHours || '0') +
+                        parseFloat(computed.restdayHours || '0'),
+                    regular_hours: parseFloat(computed.regularHours || '0'),
+                    restday_hours: parseFloat(computed.restdayHours || '0'),
+                    overtime_hours:
+                        parseFloat(computed.regularOT || '0') +
+                        parseFloat(computed.restdayOT || '0'),
+                    days_worked:
+                        typeof computed.totalDays === 'number'
+                            ? computed.totalDays
+                            : parseFloat(computed.totalDays),
+                    total_days:
+                        typeof computed.totalDays === 'number'
+                            ? computed.totalDays
+                            : parseFloat(computed.totalDays),
+                    late_minutes: computed.totalLateMinutes || 0,
+                    absent_days: parseFloat(computed.absentDays || '0'),
+                    // Night Differential
+                    night_diff_ordinary_working: parseFloat(
+                        computed.nightDiffOrdinaryWorking,
+                    ),
+                    night_diff_holiday:
+                        parseFloat(computed.nightDiffHolidayRegular) +
+                        parseFloat(computed.nightDiffHolidaySpecial),
+                    night_diff_holiday_restday:
+                        parseFloat(computed.nightDiffHolidayRDRegular) +
+                        parseFloat(computed.nightDiffHolidayRDSpecial),
+                    night_diff_restday: parseFloat(computed.nightDiffRestday),
+                    night_diff_holiday_ot: parseFloat(
+                        computed.nightDiffHolidayOT,
+                    ),
+                    night_diff_holiday_restday_ot: parseFloat(
+                        computed.nightDiffHolidayRestdayOT,
+                    ),
+                    // Overtime Pay
+                    ot_holiday: parseFloat(computed.otHoliday),
+                    ot_holiday_restday: parseFloat(computed.otHolidayRestday),
+                    ot_regular: parseFloat(computed.otRegular),
+                    ot_restday: parseFloat(computed.otRestday),
+                    ot_ordinary_working: parseFloat(computed.otOrdinaryWorking),
+                    // Additional Premium Pay
+                    premium_restday: parseFloat(computed.premiumRestday),
+                    premium_holiday_regular: parseFloat(
+                        computed.additionalHolidayRegular,
+                    ),
+                    premium_holiday_special: parseFloat(
+                        computed.additionalHolidaySpecial,
+                    ),
+                    premium_holiday_rd_regular: parseFloat(
+                        computed.additionalHolidayRDRegular,
+                    ),
+                    premium_holiday_rd_special: parseFloat(
+                        computed.additionalHolidayRDSpecial,
+                    ),
+                };
+            });
+
+            console.log(payrollItems, draftSnapshot);
+
+            router.post(
+                `/payroll/${payroll.id}/generate`,
+                {
+                    payroll_items: payrollItems,
+                    draft_snapshot: { rows: snapshotRows },
+                },
+                {
+                    onSuccess: () => {
+                        // Success handled by redirect
+                    },
+                },
+            );
+        }
+    };
+
+    const handleRemoveDTR = () => {
+        if (
+            confirm(
+                'Remove this DTR and payroll draft? This action cannot be undone.',
+            )
+        ) {
+            router.delete(`/payroll/${payroll.id}/remove-dtr`, {
+                onSuccess: () => {
+                    // Success handled by redirect
+                },
+            });
+        }
+    };
+
+    const calculatePayroll = (
+        employee: Employee,
+        attendanceList: Attendance[],
+        loanDeduction: number = 0,
+        scheduledWorkingDays: number = 0,
+        absentDays: number = 0,
+    ) => {
+        const basicRate = parseFloat(employee.basic_rate);
+        const allowance = parseFloat(employee.allowance || '0');
+
+        // Ensure loanDeduction is a number
+        const loanDeductionAmount =
+            typeof loanDeduction === 'number'
+                ? loanDeduction
+                : parseFloat(loanDeduction || '0');
+
+        // Calculate rates
+        let dailyRate = 0;
+        let hourlyRate = 0;
+        let hourlyAllowance = 0;
+
+        if (employee.rate_type === 'monthly') {
+            dailyRate = basicRate / 20;
+            hourlyRate = dailyRate / 8;
+            hourlyAllowance = allowance / 20 / 8;
+        } else {
+            dailyRate = basicRate;
+            hourlyRate = basicRate / 8;
+            hourlyAllowance = allowance / 8;
+        }
+
+        const totalHourlyRate = hourlyRate + hourlyAllowance;
+
+        // Work Schedule Summary
+        // totalDays = scheduled working days minus absences (actual days worked)
+        const totalDays = Math.max(0, scheduledWorkingDays - absentDays);
+
+        // Calculate late minutes from clock_in vs scheduled_in with 15-minute grace
+        const totalLateMinutes = attendanceList.reduce((sum, a: any) => {
+            const clockIn = a.clock_in as string | null;
+            const scheduledIn = a.scheduled_in as string | null;
+
+            // Skip if no times, rest day, or holiday
+            if (!clockIn || !scheduledIn || a.is_restday || a.is_holiday) {
+                return sum;
+            }
+
+            try {
+                const dateStr = (a.date as string) || '1970-01-01';
+                const baseDate = dateStr.includes('T')
+                    ? dateStr.split('T')[0]
+                    : dateStr;
+
+                const toDate = (time: string) => {
+                    const t = time.slice(0, 8); // HH:mm:ss
+                    return new Date(`${baseDate}T${t}`);
+                };
+
+                const inDate = toDate(clockIn);
+                const schedDate = toDate(scheduledIn);
+                const diffMinutes =
+                    (inDate.getTime() - schedDate.getTime()) / 60000;
+
+                // 15-minute grace: <=15 mins late => 0, >15 => full diff
+                if (diffMinutes > 15) {
+                    return sum + diffMinutes;
+                }
+            } catch (e) {
+                // Ignore parse errors and treat as no late
+                return sum;
+            }
+
+            return sum;
+        }, 0);
+
+        // Total late minutes (used for late deduction). Absences are handled separately.
+        const lateAndAbsMinutes = totalLateMinutes;
+
+        // Categorize attendance by day type
+        const regularDays = attendanceList.filter(
+            (a) => !a.is_restday && !a.is_holiday,
+        );
+        const restdays = attendanceList.filter(
+            (a) => a.is_restday && !a.is_holiday,
+        );
+        const regularHolidays = attendanceList.filter(
+            (a) =>
+                a.is_holiday && a.holiday_type === 'regular' && !a.is_restday,
+        );
+        const specialHolidays = attendanceList.filter(
+            (a) =>
+                a.is_holiday && a.holiday_type === 'special' && !a.is_restday,
+        );
+        const regularHolidaysOnRD = attendanceList.filter(
+            (a) => a.is_holiday && a.holiday_type === 'regular' && a.is_restday,
+        );
+        const specialHolidaysOnRD = attendanceList.filter(
+            (a) => a.is_holiday && a.holiday_type === 'special' && a.is_restday,
+        );
+
+        // Hours worked by category
+        const regularHours = regularDays.reduce(
+            (sum, a) => sum + (Number(a.hours_worked) || 0),
+            0,
+        );
+        const restdayHours = restdays.reduce(
+            (sum, a) => sum + (Number(a.hours_worked) || 0),
+            0,
+        );
+        const regularHolidayHours = regularHolidays.reduce(
+            (sum, a) => sum + (Number(a.hours_worked) || 0),
+            0,
+        );
+        const specialHolidayHours = specialHolidays.reduce(
+            (sum, a) => sum + (Number(a.hours_worked) || 0),
+            0,
+        );
+        const regularHolidayRDHours = regularHolidaysOnRD.reduce(
+            (sum, a) => sum + (Number(a.hours_worked) || 0),
+            0,
+        );
+        const specialHolidayRDHours = specialHolidaysOnRD.reduce(
+            (sum, a) => sum + (Number(a.hours_worked) || 0),
+            0,
+        );
+
+        // OT hours by category (only paid OT beyond 8 hours)
+        const regularOT = regularDays
+            .filter((a) => a.is_ot_paid)
+            .reduce((sum, a) => sum + (Number(a.overtime_hours) || 0), 0);
+        const restdayOT = restdays
+            .filter((a) => a.is_ot_paid)
+            .reduce((sum, a) => sum + (Number(a.overtime_hours) || 0), 0);
+        const regularHolidayOT = regularHolidays
+            .filter((a) => a.is_ot_paid)
+            .reduce((sum, a) => sum + (Number(a.overtime_hours) || 0), 0);
+        const specialHolidayOT = specialHolidays
+            .filter((a) => a.is_ot_paid)
+            .reduce((sum, a) => sum + (Number(a.overtime_hours) || 0), 0);
+        const regularHolidayRDOT = regularHolidaysOnRD
+            .filter((a) => a.is_ot_paid)
+            .reduce((sum, a) => sum + (Number(a.overtime_hours) || 0), 0);
+        const specialHolidayRDOT = specialHolidaysOnRD
+            .filter((a) => a.is_ot_paid)
+            .reduce((sum, a) => sum + (Number(a.overtime_hours) || 0), 0);
+
+        // Night diff hours by category
+        const regularNightDiff = regularDays.reduce(
+            (sum, a) => sum + (Number(a.night_diff_hours) || 0),
+            0,
+        );
+        const nightShiftRestday = restdays.reduce(
+            (sum, a) => sum + (Number(a.night_diff_hours) || 0),
+            0,
+        );
+        const nightDiffRegularHoliday = regularHolidays.reduce(
+            (sum, a) => sum + (Number(a.night_diff_hours) || 0),
+            0,
+        );
+        const nightDiffSpecialHoliday = specialHolidays.reduce(
+            (sum, a) => sum + (Number(a.night_diff_hours) || 0),
+            0,
+        );
+        const nightDiffRegularHolidayRD = regularHolidaysOnRD.reduce(
+            (sum, a) => sum + (Number(a.night_diff_hours) || 0),
+            0,
+        );
+        const nightDiffSpecialHolidayRD = specialHolidaysOnRD.reduce(
+            (sum, a) => sum + (Number(a.night_diff_hours) || 0),
+            0,
+        );
+
+        // ===== BASIC PAY & ALLOWANCE =====
+        // Basic Pay = Monthly Rate / 2 (for 2nd half cutoff)
+        // For daily rate: Daily Rate × Total Days
+        const basicPay =
+            employee.rate_type === 'monthly'
+                ? basicRate / 2
+                : basicRate * totalDays;
+
+        // Allowance calculation
+        let regularAllowance = 0;
+        let restdayAllowance = 0;
+
+        if (employee.rate_type === 'monthly') {
+            // For monthly: Allowance / 2 (for 2nd half cutoff)
+            // Regular gets full amount, restday gets proportional share
+            regularAllowance = allowance / 2;
+            // Restday allowance is calculated hourly and proportional
+            if (restdayHours > 0) {
+                const hourlyAllowanceRate = allowance / 2 / 20 / 4; // Hourly allowance (doubled rate for restday)
+                restdayAllowance = restdayHours * hourlyAllowanceRate;
+            }
+        } else {
+            // For daily: Allowance × Total Days
+            regularAllowance = allowance * totalDays;
+            restdayAllowance = 0;
+        }
+
+        // ===== RESTDAY PAY =====
+        // Restday Pay = (Basic Pay / Total Days) × Restday Hours
+        // This represents the base daily rate for working on a rest day
+        let restdayPay = 0;
+        if (employee.rate_type === 'monthly') {
+            // Guard against division by zero when totalDays is 0
+            if (totalDays > 0) {
+                restdayPay = (basicPay / totalDays) * (restdayHours / 8);
+            } else {
+                restdayPay = 0;
+            }
+        } else {
+            restdayPay = restdayHours * hourlyRate;
+        }
+
+        // ===== NIGHT DIFFERENTIAL BREAKDOWN (Dynamic rates from settings) =====
+        const nightDiffOrdinaryWorking =
+            regularNightDiff *
+            hourlyRate *
+            getPremiumRate('night_diff', 'Ordinary Working days', 0.1);
+        const nightDiffRestday =
+            nightShiftRestday *
+            hourlyRate *
+            getPremiumRate('night_diff', 'Restday', 0.13);
+        const nightDiffHolidayRegular =
+            nightDiffRegularHoliday *
+            hourlyRate *
+            getPremiumRate('night_diff', 'Holiday', 0.13);
+        const nightDiffHolidaySpecial =
+            nightDiffSpecialHoliday * hourlyRate * 0.13;
+        const nightDiffHolidayRDRegular =
+            nightDiffRegularHolidayRD *
+            hourlyRate *
+            getPremiumRate('night_diff', 'Holiday on a Restday', 0.2);
+        const nightDiffHolidayRDSpecial =
+            nightDiffSpecialHolidayRD * hourlyRate * 0.2;
+        const nightDiffHolidayOT =
+            (regularHolidayOT + specialHolidayOT) *
+            hourlyRate *
+            getPremiumRate('night_diff', 'Holiday (OT)', 0.125);
+        const nightDiffHolidayRestdayOT =
+            (regularHolidayRDOT + specialHolidayRDOT) *
+            hourlyRate *
+            getPremiumRate('night_diff', 'Holiday on a Restday (OT)', 0.338);
+
+        // ===== ADDITIONAL PREMIUM PAY for 1st 8 hrs (Dynamic rates from settings) =====
+        const additionalRestday =
+            restdayHours * hourlyRate * getAdditionalRate('Restday', 0.3);
+        const additionalHolidayRegular =
+            regularHolidayHours *
+            hourlyRate *
+            getAdditionalRate('Holiday Regular', 2.0);
+        const additionalHolidaySpecial =
+            specialHolidayHours *
+            hourlyRate *
+            getAdditionalRate('Holiday Special', 1.3);
+        const additionalHolidayRDRegular =
+            regularHolidayRDHours *
+            hourlyRate *
+            getAdditionalRate('Holiday on RD (Regular)', 2.6);
+        const additionalHolidayRDSpecial =
+            specialHolidayRDHours *
+            hourlyRate *
+            getAdditionalRate('Holiday on RD (Special)', 1.5);
+
+        // ===== OVERTIME PAY in excess of 8 hrs (Dynamic rates from settings) =====
+        const otRegular =
+            regularOT *
+            hourlyRate *
+            getPremiumRate('overtime', 'Regular', 1.25);
+        const otRestday =
+            restdayOT * hourlyRate * getPremiumRate('overtime', 'Restday', 1.6);
+        const otHoliday =
+            (regularHolidayOT + specialHolidayOT) *
+            hourlyRate *
+            getPremiumRate('overtime', 'Holiday', 1.26);
+        const otHolidayRestday =
+            (regularHolidayRDOT + specialHolidayRDOT) *
+            hourlyRate *
+            getPremiumRate('overtime', 'Holiday on a Restday', 1.38);
+        const otOrdinaryWorking =
+            regularNightDiff *
+            hourlyRate *
+            getPremiumRate('overtime', 'Ordinary Working days', 0.1);
+
+        // Legacy variables for backward compatibility
+        const premiumRestday = additionalRestday;
+        const premiumHolidayRegular = additionalHolidayRegular;
+        const premiumHolidaySpecial = additionalHolidaySpecial;
+        const premiumHolidayRDRegular = additionalHolidayRDRegular;
+        const premiumHolidayRDSpecial = additionalHolidayRDSpecial;
+
+        // ===== LATE & ABSENCE DEDUCTION =====
+        // Late deduction is purely based on late minutes.
+        const lateDeduction = (totalLateMinutes / 60) * hourlyRate;
+
+        // Absence deduction is based on absent days for monthly employees.
+        let absenceDeduction = 0;
+        if (employee.rate_type === 'monthly') {
+            const dailyRateForAbsence = basicRate / 20; // standard 20 working days
+            absenceDeduction = dailyRateForAbsence * absentDays;
+        }
+
+        // ===== GROSS PAY =====
+        const totalPay =
+            basicPay +
+            restdayPay +
+            regularAllowance +
+            restdayAllowance +
+            // Night Differential
+            nightDiffOrdinaryWorking +
+            nightDiffRestday +
+            nightDiffHolidayRegular +
+            nightDiffHolidaySpecial +
+            nightDiffHolidayRDRegular +
+            nightDiffHolidayRDSpecial +
+            nightDiffHolidayOT +
+            nightDiffHolidayRestdayOT +
+            // Overtime Pay
+            otRegular +
+            otRestday +
+            otHoliday +
+            otHolidayRestday +
+            otOrdinaryWorking +
+            // Additional Premium Pay
+            additionalRestday +
+            additionalHolidayRegular +
+            additionalHolidaySpecial +
+            additionalHolidayRDRegular +
+            additionalHolidayRDSpecial;
+
+        // ===== DEDUCTIONS =====
+        // Statutory deductions based on monthly salary (for monthly employees)
+        let sssDeduction = 0;
+        let phicDeduction = 0;
+        let hdmfDeduction = 0;
+        let taxDeduction = 0;
+
+        if (applyStatutoryDeductions) {
+            // SSS: Use total pay (cutoff gross) to lookup bracket
+            sssDeduction = getSSSDeduc(totalPay) || 0;
+
+            // PHIC: Use dynamic settings (rate × employee_share), divided by 2 for cutoff
+            const phicRate = phicSettings?.rate
+                ? parseFloat(phicSettings.rate.toString()) / 100
+                : 0.05;
+            const phicEmployeeShare = phicSettings?.employee_share
+                ? parseFloat(phicSettings.employee_share.toString()) / 100
+                : 0.5;
+            phicDeduction = (basicRate * phicRate * phicEmployeeShare) / 2;
+
+            // HDMF: Use dynamic settings
+            hdmfDeduction = hdmfSettings?.employee_contribution ?? 200;
+
+            // Tax: Based on annual income bracket (for monthly employees only)
+            if (employee.rate_type === 'monthly') {
+                const monthlySalary = basicRate;
+                const annualSalary = monthlySalary * 12;
+                taxDeduction = getTaxDeduction(annualSalary);
+            }
+        }
+
+        // Late, absence, and loan deductions are always applied
+        const totalDeductions =
+            sssDeduction +
+            phicDeduction +
+            hdmfDeduction +
+            taxDeduction +
+            loanDeductionAmount +
+            lateDeduction +
+            absenceDeduction;
+        const netPay = totalPay - totalDeductions;
+
+        return {
+            // Wage Rate Details
+            payrollType: employee.rate_type === 'monthly' ? 'Monthly' : 'Daily',
+            basicRate: basicRate.toFixed(2),
+            allowanceRate: allowance.toFixed(2),
+            hourlyBasic: hourlyRate.toFixed(2),
+            hourlyAllowance: hourlyAllowance.toFixed(2),
+            hourlyTotal: totalHourlyRate.toFixed(2),
+
+            // Work Schedule
+            totalDays,
+            totalLateMinutes,
+            restdayOT: restdayOT.toFixed(2),
+            regularOT: regularOT.toFixed(2),
+            nightShiftRestday: nightShiftRestday.toFixed(2),
+
+            // Salary Computation
+            basicPay: basicPay.toFixed(2),
+            restdayPay: restdayPay.toFixed(2),
+            regularAllowance: regularAllowance.toFixed(2),
+            restdayAllowance: restdayAllowance.toFixed(2),
+            // Display column shows combined late + absence deduction
+            latesDeduction: (lateDeduction + absenceDeduction).toFixed(2),
+            totalPay: totalPay.toFixed(2),
+
+            // Late & Absence (for display in minutes)
+            lateAndAbsMinutes,
+
+            // Night Differential Breakdown
+            nightDiffOrdinaryWorking: nightDiffOrdinaryWorking.toFixed(2),
+            nightDiffRestday: nightDiffRestday.toFixed(2),
+            nightDiffHolidayRegular: nightDiffHolidayRegular.toFixed(2),
+            nightDiffHolidaySpecial: nightDiffHolidaySpecial.toFixed(2),
+            nightDiffHolidayRDRegular: nightDiffHolidayRDRegular.toFixed(2),
+            nightDiffHolidayRDSpecial: nightDiffHolidayRDSpecial.toFixed(2),
+            nightDiffHolidayOT: nightDiffHolidayOT.toFixed(2),
+            nightDiffHolidayRestdayOT: nightDiffHolidayRestdayOT.toFixed(2),
+
+            // Additional Premium Pay for 1st 8 hrs
+            additionalRestday: additionalRestday.toFixed(2),
+            additionalHolidayRegular: additionalHolidayRegular.toFixed(2),
+            additionalHolidaySpecial: additionalHolidaySpecial.toFixed(2),
+            additionalHolidayRDRegular: additionalHolidayRDRegular.toFixed(2),
+            additionalHolidayRDSpecial: additionalHolidayRDSpecial.toFixed(2),
+
+            // Overtime Pay in excess of 8 hrs
+            otRegular: otRegular.toFixed(2),
+            otRestday: otRestday.toFixed(2),
+            otHoliday: otHoliday.toFixed(2),
+            otHolidayRestday: otHolidayRestday.toFixed(2),
+            otHolidayRegular: (
+                regularHolidayOT *
+                hourlyRate *
+                getPremiumRate('overtime', 'Holiday', 1.26)
+            ).toFixed(2),
+            otHolidaySpecial: (
+                specialHolidayOT *
+                hourlyRate *
+                getPremiumRate('overtime', 'Holiday', 1.26)
+            ).toFixed(2),
+            otHolidayRDRegular: (
+                regularHolidayRDOT *
+                hourlyRate *
+                getPremiumRate('overtime', 'Holiday on a Restday', 1.38)
+            ).toFixed(2),
+            otHolidayRDSpecial: (
+                specialHolidayRDOT *
+                hourlyRate *
+                getPremiumRate('overtime', 'Holiday on a Restday', 1.38)
+            ).toFixed(2),
+            otOrdinaryWorking: otOrdinaryWorking.toFixed(2),
+
+            // Legacy premium variables (for backward compatibility)
+            premiumRestday: premiumRestday.toFixed(2),
+            premiumHolidayRegular: premiumHolidayRegular.toFixed(2),
+            premiumHolidaySpecial: premiumHolidaySpecial.toFixed(2),
+            premiumHolidayRDRegular: premiumHolidayRDRegular.toFixed(2),
+            premiumHolidayRDSpecial: premiumHolidayRDSpecial.toFixed(2),
+
+            // Deductions
+            sssDeduction: sssDeduction.toFixed(2),
+            phicDeduction: phicDeduction.toFixed(2),
+            hdmfDeduction: hdmfDeduction.toFixed(2),
+            taxDeduction: taxDeduction.toFixed(2),
+            loanDeduction: loanDeductionAmount.toFixed(2),
+            lateDeduction: lateDeduction.toFixed(2),
+            absenceDeduction: absenceDeduction.toFixed(2),
+            totalDeductions: totalDeductions.toFixed(2),
+
+            // Net Pay
+            netPay: netPay.toFixed(2),
+
+            // Additional fields for backend
+            regularHours: regularHours.toFixed(2),
+            restdayHours: restdayHours.toFixed(2),
+            absentDays: absentDays.toString(),
+        };
+    };
+
+    // Aggregate premium values across all rows to decide which columns to show
+    const premiumVisibility = (() => {
+        const totals = {
+            // Night Differential
+            nightDiffOrdinaryWorking: 0,
+            nightDiffRestday: 0,
+            nightDiffHolidayRegular: 0,
+            nightDiffHolidaySpecial: 0,
+            nightDiffHolidayRDRegular: 0,
+            nightDiffHolidayRDSpecial: 0,
+            nightDiffHolidayOT: 0,
+            nightDiffHolidayRestdayOT: 0,
+            // Additional Premium Pay (1st 8 hrs)
+            additionalRestday: 0,
+            additionalHolidayRegular: 0,
+            additionalHolidaySpecial: 0,
+            additionalHolidayRDRegular: 0,
+            additionalHolidayRDSpecial: 0,
+            // Overtime Pay (excess of 8 hrs)
+            otRegular: 0,
+            otRestday: 0,
+            otHolidayRegular: 0,
+            otHolidaySpecial: 0,
+            otHolidayRDRegular: 0,
+            otHolidayRDSpecial: 0,
+            otOrdinaryWorking: 0,
+        };
+
+        if (draftSnapshot && Array.isArray((draftSnapshot as any).rows)) {
+            // Use stored snapshot rows
+            (draftSnapshot as any).rows.forEach((row: any) => {
+                const payroll = row.payroll || {};
+
+                // Night Differential
+                totals.nightDiffOrdinaryWorking += parseFloat(
+                    payroll.nightDiffOrdinaryWorking || '0',
+                );
+                totals.nightDiffRestday += parseFloat(
+                    payroll.nightDiffRestday || '0',
+                );
+                totals.nightDiffHolidayRegular += parseFloat(
+                    payroll.nightDiffHolidayRegular || '0',
+                );
+                totals.nightDiffHolidaySpecial += parseFloat(
+                    payroll.nightDiffHolidaySpecial || '0',
+                );
+                totals.nightDiffHolidayRDRegular += parseFloat(
+                    payroll.nightDiffHolidayRDRegular || '0',
+                );
+                totals.nightDiffHolidayRDSpecial += parseFloat(
+                    payroll.nightDiffHolidayRDSpecial || '0',
+                );
+                totals.nightDiffHolidayOT += parseFloat(
+                    payroll.nightDiffHolidayOT || '0',
+                );
+                totals.nightDiffHolidayRestdayOT += parseFloat(
+                    payroll.nightDiffHolidayRestdayOT || '0',
+                );
+
+                // Additional Premium Pay (1st 8 hrs)
+                totals.additionalRestday += parseFloat(
+                    payroll.additionalRestday || '0',
+                );
+                totals.additionalHolidayRegular += parseFloat(
+                    payroll.additionalHolidayRegular || '0',
+                );
+                totals.additionalHolidaySpecial += parseFloat(
+                    payroll.additionalHolidaySpecial || '0',
+                );
+                totals.additionalHolidayRDRegular += parseFloat(
+                    payroll.additionalHolidayRDRegular || '0',
+                );
+                totals.additionalHolidayRDSpecial += parseFloat(
+                    payroll.additionalHolidayRDSpecial || '0',
+                );
+
+                // Overtime Pay (excess of 8 hrs)
+                totals.otRegular += parseFloat(payroll.otRegular || '0');
+                totals.otRestday += parseFloat(payroll.otRestday || '0');
+                totals.otHolidayRegular += parseFloat(
+                    payroll.otHolidayRegular || '0',
+                );
+                totals.otHolidaySpecial += parseFloat(
+                    payroll.otHolidaySpecial || '0',
+                );
+                totals.otHolidayRDRegular += parseFloat(
+                    payroll.otHolidayRDRegular || '0',
+                );
+                totals.otHolidayRDSpecial += parseFloat(
+                    payroll.otHolidayRDSpecial || '0',
+                );
+                totals.otOrdinaryWorking += parseFloat(
+                    payroll.otOrdinaryWorking || '0',
+                );
+            });
+        } else if (attendances) {
+            attendances.forEach(
+                ({ employee, attendances: empAttendances, loan_deduction }) => {
+                    const payroll = calculatePayroll(
+                        employee,
+                        empAttendances,
+                        loan_deduction,
+                    );
+
+                    // Night Differential
+                    totals.nightDiffOrdinaryWorking += parseFloat(
+                        payroll.nightDiffOrdinaryWorking,
+                    );
+                    totals.nightDiffRestday += parseFloat(
+                        payroll.nightDiffRestday,
+                    );
+                    totals.nightDiffHolidayRegular += parseFloat(
+                        payroll.nightDiffHolidayRegular,
+                    );
+                    totals.nightDiffHolidaySpecial += parseFloat(
+                        payroll.nightDiffHolidaySpecial,
+                    );
+                    totals.nightDiffHolidayRDRegular += parseFloat(
+                        payroll.nightDiffHolidayRDRegular,
+                    );
+                    totals.nightDiffHolidayRDSpecial += parseFloat(
+                        payroll.nightDiffHolidayRDSpecial,
+                    );
+                    totals.nightDiffHolidayOT += parseFloat(
+                        payroll.nightDiffHolidayOT,
+                    );
+                    totals.nightDiffHolidayRestdayOT += parseFloat(
+                        payroll.nightDiffHolidayRestdayOT,
+                    );
+
+                    // Additional Premium Pay (1st 8 hrs)
+                    totals.additionalRestday += parseFloat(
+                        payroll.additionalRestday,
+                    );
+                    totals.additionalHolidayRegular += parseFloat(
+                        payroll.additionalHolidayRegular,
+                    );
+                    totals.additionalHolidaySpecial += parseFloat(
+                        payroll.additionalHolidaySpecial,
+                    );
+                    totals.additionalHolidayRDRegular += parseFloat(
+                        payroll.additionalHolidayRDRegular,
+                    );
+                    totals.additionalHolidayRDSpecial += parseFloat(
+                        payroll.additionalHolidayRDSpecial,
+                    );
+
+                    // Overtime Pay (excess of 8 hrs)
+                    totals.otRegular += parseFloat(payroll.otRegular);
+                    totals.otRestday += parseFloat(payroll.otRestday);
+                    totals.otHolidayRegular += parseFloat(
+                        payroll.otHolidayRegular,
+                    );
+                    totals.otHolidaySpecial += parseFloat(
+                        payroll.otHolidaySpecial,
+                    );
+                    totals.otHolidayRDRegular += parseFloat(
+                        payroll.otHolidayRDRegular,
+                    );
+                    totals.otHolidayRDSpecial += parseFloat(
+                        payroll.otHolidayRDSpecial,
+                    );
+                    totals.otOrdinaryWorking += parseFloat(
+                        payroll.otOrdinaryWorking,
+                    );
+                },
+            );
+        }
+
+        const toBool = (value: number) => Math.abs(value) > 0.009;
+
+        return {
+            nightDiff: {
+                ordinaryWorking: toBool(totals.nightDiffOrdinaryWorking),
+                restday: toBool(totals.nightDiffRestday),
+                holidayRegular: toBool(totals.nightDiffHolidayRegular),
+                holidaySpecial: toBool(totals.nightDiffHolidaySpecial),
+                holidayRDRegular: toBool(totals.nightDiffHolidayRDRegular),
+                holidayRDSpecial: toBool(totals.nightDiffHolidayRDSpecial),
+                holidayOT: toBool(totals.nightDiffHolidayOT),
+                holidayRestdayOT: toBool(totals.nightDiffHolidayRestdayOT),
+            },
+            additional: {
+                restday: toBool(totals.additionalRestday),
+                holidayRegular: toBool(totals.additionalHolidayRegular),
+                holidaySpecial: toBool(totals.additionalHolidaySpecial),
+                holidayRDRegular: toBool(totals.additionalHolidayRDRegular),
+                holidayRDSpecial: toBool(totals.additionalHolidayRDSpecial),
+            },
+            overtime: {
+                regularOT: toBool(totals.otRegular),
+                restday: toBool(totals.otRestday),
+                holidayRegular: toBool(totals.otHolidayRegular),
+                holidaySpecial: toBool(totals.otHolidaySpecial),
+                holidayRDRegular: toBool(totals.otHolidayRDRegular),
+                holidayRDSpecial: toBool(totals.otHolidayRDSpecial),
+                ordinaryWorking: toBool(totals.otOrdinaryWorking),
+            },
+        };
+    })();
+
+    const nightDiffColCount = Object.values(premiumVisibility.nightDiff).filter(
+        Boolean,
+    ).length;
+    const additionalColCount = Object.values(
+        premiumVisibility.additional,
+    ).filter(Boolean).length;
+    const overtimeColCount = Object.values(premiumVisibility.overtime).filter(
+        Boolean,
+    ).length;
+
+    // Calculate dynamic colSpan for SALARY COMPUTATION
+    const premiumColCount =
+        nightDiffColCount + additionalColCount + overtimeColCount;
+    const salaryComputationColSpan = 6 + premiumColCount; // 6 base columns (including 1 spacer) + dynamic premium columns
+
+    const formatCurrency = (amount: number | string) => {
+        return new Intl.NumberFormat('en-PH', {
+            style: 'currency',
+            currency: 'PHP',
+            minimumFractionDigits: 2,
+        }).format(typeof amount === 'string' ? parseFloat(amount) : amount);
+    };
+
+    const attendanceArray = attendances || [];
+    const usingSnapshot =
+        !!draftSnapshot && Array.isArray((draftSnapshot as any).rows);
+    const rowSource: any[] = usingSnapshot
+        ? ((draftSnapshot as any).rows as any[])
+        : attendanceArray;
+    const hasRows = usingSnapshot
+        ? rowSource.length > 0
+        : attendanceArray.length > 0;
+
+    return (
+        <AppLayout breadcrumbs={breadcrumbs}>
+            <Head title={`Payroll - ${payroll.payroll_period}`} />
+            <div className="flex h-full flex-1 flex-col gap-4 p-4">
+                {/* Header */}
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                        <Link href="/payroll">
+                            <Button variant="ghost" size="icon">
+                                <ArrowLeft className="h-4 w-4" />
+                            </Button>
+                        </Link>
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <h1 className="text-2xl font-bold tracking-tight">
+                                    {payroll.payroll_period} - {payroll.month}{' '}
+                                    {payroll.year}
+                                </h1>
+                                <Badge variant="secondary">Draft</Badge>
+                            </div>
+                            <p className="text-muted-foreground">
+                                Review payroll computation before generating
+                            </p>
+                        </div>
+                    </div>
+                    {payroll.status === 'draft' && canGeneratePayroll() && (
+                        <div className="flex gap-2">
+                            {canDelete('payroll') && (
+                                <Button
+                                    variant="destructive"
+                                    onClick={handleRemoveDTR}
+                                >
+                                    <Trash2 className="mr-2 h-4 w-4" />
+                                    Remove DTR
+                                </Button>
+                            )}
+                            <Button onClick={handleGenerate}>
+                                <CheckCircle className="mr-2 h-4 w-4" />
+                                Submit Payroll
+                            </Button>
+                        </div>
+                    )}
+                </div>
+
+                {/* Payroll Table */}
+                {!hasRows ? (
+                    <Card>
+                        <CardContent className="py-12">
+                            <p className="text-center text-muted-foreground">
+                                No attendance records found
+                            </p>
+                        </CardContent>
+                    </Card>
+                ) : (
+                    <Card className="overflow-hidden">
+                        <CardContent className="p-0">
+                            <div className="overflow-x-auto">
+                                <table className="w-full border-collapse text-sm">
+                                    <thead>
+                                        {/* First Header Row - Section Titles */}
+                                        <tr className="border-b">
+                                            <th
+                                                rowSpan={2}
+                                                className="border-r bg-gray-100 p-3 font-bold"
+                                            >
+                                                NAME
+                                            </th>
+                                            <th
+                                                colSpan={6}
+                                                className="border-r bg-yellow-100 p-2 text-center font-bold"
+                                            >
+                                                WAGE RATE DETAILS
+                                            </th>
+                                            <th
+                                                colSpan={5}
+                                                className="border-r bg-green-100 p-2 text-center font-bold"
+                                            >
+                                                WORK SCHEDULE
+                                            </th>
+                                            <th
+                                                colSpan={
+                                                    salaryComputationColSpan
+                                                }
+                                                className="border-r bg-blue-100 p-2 text-center font-bold"
+                                            >
+                                                SALARY COMPUTATION
+                                            </th>
+                                            <th
+                                                colSpan={5}
+                                                className="border-r bg-gray-200 p-2 text-center font-bold"
+                                            >
+                                                DEDUCTION
+                                            </th>
+                                            <th
+                                                rowSpan={2}
+                                                className="bg-orange-100 p-2 text-center font-bold"
+                                            >
+                                                NET PAY
+                                            </th>
+                                        </tr>
+
+                                        {/* Second Header Row - Column Names */}
+                                        <tr className="border-b text-xs">
+                                            {/* Wage Rate Details */}
+                                            <th className="border-r bg-yellow-50 p-2">
+                                                Payroll
+                                            </th>
+                                            <th className="border-r bg-yellow-50 p-2">
+                                                Basic
+                                                <br />
+                                                Rate
+                                            </th>
+                                            <th className="border-r bg-yellow-50 p-2">
+                                                Allowance
+                                            </th>
+                                            <th
+                                                colSpan={3}
+                                                className="border-r bg-yellow-50 p-2 font-semibold"
+                                            >
+                                                PER HOUR RATE
+                                            </th>
+
+                                            {/* Work Schedule */}
+                                            <th className="border-r bg-green-50 p-2">
+                                                Total No.
+                                                <br />
+                                                of work
+                                                <br />
+                                                days
+                                            </th>
+                                            <th className="border-r bg-green-50 p-2">
+                                                LATE /<br />
+                                                ABSENCES
+                                                <br />
+                                                (in mins.)
+                                            </th>
+                                            <th className="border-r bg-green-50 p-2">
+                                                Restday
+                                                <br />
+                                                OT (in Hrs.)
+                                                <br />
+                                                30%
+                                            </th>
+                                            <th className="border-r bg-green-50 p-2">
+                                                Regular
+                                                <br />
+                                                OT (in Hrs.)
+                                                <br />
+                                                125%
+                                            </th>
+                                            <th className="border-r bg-green-50 p-2">
+                                                Night Shift DF
+                                                <br />
+                                                Restday (in Hrs.)
+                                                <br />
+                                                13%
+                                            </th>
+
+                                            {/* Salary Computation */}
+                                            <th className="border-r bg-blue-50 p-2">
+                                                Basic
+                                                <br />
+                                                Pay
+                                            </th>
+                                            <th className="border-r bg-blue-50 p-2">
+                                                Restday
+                                                <br />
+                                                Pay
+                                            </th>
+                                            <th className="border-r bg-blue-50 p-2">
+                                                Lates
+                                                <br />
+                                                Deduction
+                                            </th>
+                                            <th
+                                                colSpan={2}
+                                                className="border-r bg-blue-50 p-2 font-semibold"
+                                            >
+                                                Allowance
+                                            </th>
+
+                                            {/* NIGHT DIFFERENTIAL - only if any ND column has data */}
+                                            {nightDiffColCount > 0 && (
+                                                <th
+                                                    colSpan={nightDiffColCount}
+                                                    className="border-r bg-purple-100 p-2 font-semibold"
+                                                >
+                                                    NIGHT DIFFERENTIAL
+                                                </th>
+                                            )}
+
+                                            {/* ADDITIONAL PREMIUM PAY for 1st 8 hrs - only if any additional column has data */}
+                                            {additionalColCount > 0 && (
+                                                <th
+                                                    colSpan={additionalColCount}
+                                                    className="border-r bg-orange-100 p-2 font-semibold"
+                                                >
+                                                    ADDITIONAL PREMIUM PAY (1st
+                                                    8 hrs)
+                                                </th>
+                                            )}
+
+                                            {/* OVERTIME PAY in excess of 8 hrs - only if any OT column has data */}
+                                            {overtimeColCount > 0 && (
+                                                <th
+                                                    colSpan={overtimeColCount}
+                                                    className="border-r bg-green-100 p-2 font-semibold"
+                                                >
+                                                    OVERTIME PAY (excess of 8
+                                                    hrs)
+                                                </th>
+                                            )}
+
+                                            <th className="border-r bg-blue-50 p-2 font-bold">
+                                                Total pay
+                                            </th>
+
+                                            {/* Deductions */}
+                                            <th className="border-r bg-gray-100 p-2">
+                                                SSS
+                                            </th>
+                                            <th className="border-r bg-gray-100 p-2">
+                                                PHIC
+                                            </th>
+                                            <th className="border-r bg-gray-100 p-2">
+                                                HDMF
+                                            </th>
+                                            <th className="border-r bg-gray-100 p-2">
+                                                TAX
+                                            </th>
+                                            <th className="border-r bg-gray-100 p-2">
+                                                LOAN
+                                            </th>
+                                        </tr>
+
+                                        {/* Third Header Row - Sub-columns */}
+                                        <tr className="border-b bg-gray-50 text-xs">
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r bg-yellow-50 p-2">
+                                                Basic
+                                            </th>
+                                            <th className="border-r bg-yellow-50 p-2">
+                                                Allowance
+                                            </th>
+                                            <th className="border-r bg-yellow-50 p-2">
+                                                Total
+                                            </th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r p-2"></th>
+                                            <th className="border-r bg-blue-50 p-2">
+                                                Regular
+                                            </th>
+                                            <th className="border-r bg-blue-50 p-2">
+                                                Restday
+                                            </th>
+
+                                            {/* Night Differential Sub-columns - per-column visibility */}
+                                            {premiumVisibility.nightDiff
+                                                .ordinaryWorking && (
+                                                <th className="border-r bg-purple-50 p-2 text-xs">
+                                                    Ordinary
+                                                    <br />
+                                                    Working
+                                                </th>
+                                            )}
+                                            {premiumVisibility.nightDiff
+                                                .restday && (
+                                                <th className="border-r bg-purple-50 p-2 text-xs">
+                                                    Restday
+                                                </th>
+                                            )}
+                                            {premiumVisibility.nightDiff
+                                                .holidayRegular && (
+                                                <th className="border-r bg-purple-50 p-2 text-xs">
+                                                    Holiday
+                                                    <br />
+                                                    Regular
+                                                </th>
+                                            )}
+                                            {premiumVisibility.nightDiff
+                                                .holidaySpecial && (
+                                                <th className="border-r bg-purple-50 p-2 text-xs">
+                                                    Holiday
+                                                    <br />
+                                                    Special
+                                                </th>
+                                            )}
+                                            {premiumVisibility.nightDiff
+                                                .holidayRDRegular && (
+                                                <th className="border-r bg-purple-50 p-2 text-xs">
+                                                    Holiday RD
+                                                    <br />
+                                                    Regular
+                                                </th>
+                                            )}
+                                            {premiumVisibility.nightDiff
+                                                .holidayRDSpecial && (
+                                                <th className="border-r bg-purple-50 p-2 text-xs">
+                                                    Holiday RD
+                                                    <br />
+                                                    Special
+                                                </th>
+                                            )}
+                                            {premiumVisibility.nightDiff
+                                                .holidayOT && (
+                                                <th className="border-r bg-purple-50 p-2 text-xs">
+                                                    Holiday
+                                                    <br />
+                                                    OT
+                                                </th>
+                                            )}
+                                            {premiumVisibility.nightDiff
+                                                .holidayRestdayOT && (
+                                                <th className="border-r bg-purple-50 p-2 text-xs">
+                                                    Holiday RD
+                                                    <br />
+                                                    OT
+                                                </th>
+                                            )}
+
+                                            {/* Additional Premium Pay Sub-columns - per-column visibility */}
+                                            {premiumVisibility.additional
+                                                .restday && (
+                                                <th className="border-r bg-orange-50 p-2 text-xs">
+                                                    Restday
+                                                </th>
+                                            )}
+                                            {premiumVisibility.additional
+                                                .holidayRegular && (
+                                                <th className="border-r bg-orange-50 p-2 text-xs">
+                                                    Holiday
+                                                    <br />
+                                                    Regular
+                                                </th>
+                                            )}
+                                            {premiumVisibility.additional
+                                                .holidaySpecial && (
+                                                <th className="border-r bg-orange-50 p-2 text-xs">
+                                                    Holiday
+                                                    <br />
+                                                    Special
+                                                </th>
+                                            )}
+                                            {premiumVisibility.additional
+                                                .holidayRDRegular && (
+                                                <th className="border-r bg-orange-50 p-2 text-xs">
+                                                    Holiday RD
+                                                    <br />
+                                                    Regular
+                                                </th>
+                                            )}
+                                            {premiumVisibility.additional
+                                                .holidayRDSpecial && (
+                                                <th className="border-r bg-orange-50 p-2 text-xs">
+                                                    Holiday RD
+                                                    <br />
+                                                    Special
+                                                </th>
+                                            )}
+
+                                            {/* Overtime Pay Sub-columns - per-column visibility */}
+                                            {premiumVisibility.overtime
+                                                .regularOT && (
+                                                <th className="border-r bg-green-50 p-2 text-xs">
+                                                    Regular
+                                                    <br />
+                                                    OT
+                                                </th>
+                                            )}
+                                            {premiumVisibility.overtime
+                                                .restday && (
+                                                <th className="border-r bg-green-50 p-2 text-xs">
+                                                    Restday
+                                                </th>
+                                            )}
+                                            {premiumVisibility.overtime
+                                                .holidayRegular && (
+                                                <th className="border-r bg-green-50 p-2 text-xs">
+                                                    Holiday
+                                                    <br />
+                                                    Regular
+                                                </th>
+                                            )}
+                                            {premiumVisibility.overtime
+                                                .holidaySpecial && (
+                                                <th className="border-r bg-green-50 p-2 text-xs">
+                                                    Holiday
+                                                    <br />
+                                                    Special
+                                                </th>
+                                            )}
+                                            {premiumVisibility.overtime
+                                                .holidayRDRegular && (
+                                                <th className="border-r bg-green-50 p-2 text-xs">
+                                                    Holiday RD
+                                                    <br />
+                                                    Regular
+                                                </th>
+                                            )}
+                                            {premiumVisibility.overtime
+                                                .holidayRDSpecial && (
+                                                <th className="border-r bg-green-50 p-2 text-xs">
+                                                    Holiday RD
+                                                    <br />
+                                                    Special
+                                                </th>
+                                            )}
+                                            {premiumVisibility.overtime
+                                                .ordinaryWorking && (
+                                                <th className="border-r bg-green-50 p-2 text-xs">
+                                                    Ordinary
+                                                    <br />
+                                                    Working
+                                                </th>
+                                            )}
+
+                                            <th className="p-2"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {rowSource.map((row, index) => {
+                                            // When we have a stored snapshot, use it directly.
+                                            // Otherwise, calculate on the fly from attendance.
+                                            let employee: Employee;
+                                            let payroll: any;
+
+                                            if (usingSnapshot) {
+                                                employee =
+                                                    row.employee as Employee;
+                                                payroll = row.payroll as any;
+                                            } else {
+                                                const {
+                                                    employee: emp,
+                                                    attendances: empAttendances,
+                                                    loan_deduction,
+                                                    scheduled_working_days,
+                                                    absent_days,
+                                                } = row;
+                                                employee = emp as Employee;
+                                                payroll = calculatePayroll(
+                                                    employee,
+                                                    empAttendances,
+                                                    loan_deduction || 0,
+                                                    scheduled_working_days || 0,
+                                                    absent_days || 0,
+                                                );
+                                            }
+
+                                            return (
+                                                <tr
+                                                    key={employee.id}
+                                                    className="border-b hover:bg-gray-50"
+                                                >
+                                                    {/* Name */}
+                                                    <td className="border-r p-2 font-medium">
+                                                        <div>
+                                                            {
+                                                                employee.first_name
+                                                            }{' '}
+                                                            {employee.last_name}
+                                                        </div>
+                                                        <div className="text-xs text-gray-500">
+                                                            {
+                                                                employee.employee_number
+                                                            }
+                                                        </div>
+                                                    </td>
+
+                                                    {/* Wage Rate Details */}
+                                                    <td className="border-r p-2 text-center">
+                                                        {payroll.payrollType}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.basicRate,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.allowanceRate,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.hourlyBasic,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.hourlyAllowance,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right font-semibold">
+                                                        {formatCurrency(
+                                                            payroll.hourlyTotal,
+                                                        )}
+                                                    </td>
+
+                                                    {/* Work Schedule */}
+                                                    <td className="border-r p-2 text-center">
+                                                        {payroll.totalDays}
+                                                    </td>
+                                                    <td className="border-r p-2 text-center">
+                                                        {
+                                                            payroll.lateAndAbsMinutes
+                                                        }
+                                                    </td>
+                                                    <td className="border-r p-2 text-center">
+                                                        {payroll.restdayOT}
+                                                    </td>
+                                                    <td className="border-r p-2 text-center">
+                                                        {payroll.regularOT}
+                                                    </td>
+                                                    <td className="border-r p-2 text-center">
+                                                        {
+                                                            payroll.nightShiftRestday
+                                                        }
+                                                    </td>
+
+                                                    {/* Salary Computation */}
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.basicPay,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.restdayPay,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right text-red-600">
+                                                        {formatCurrency(
+                                                            payroll.latesDeduction,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.regularAllowance,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.restdayAllowance,
+                                                        )}
+                                                    </td>
+
+                                                    {/* Night Differential Columns - per-column visibility */}
+                                                    {premiumVisibility.nightDiff
+                                                        .ordinaryWorking && (
+                                                        <td className="border-r bg-purple-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.nightDiffOrdinaryWorking,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.nightDiff
+                                                        .restday && (
+                                                        <td className="border-r bg-purple-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.nightDiffRestday,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.nightDiff
+                                                        .holidayRegular && (
+                                                        <td className="border-r bg-purple-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.nightDiffHolidayRegular,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.nightDiff
+                                                        .holidaySpecial && (
+                                                        <td className="border-r bg-purple-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.nightDiffHolidaySpecial,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.nightDiff
+                                                        .holidayRDRegular && (
+                                                        <td className="border-r bg-purple-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.nightDiffHolidayRDRegular,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.nightDiff
+                                                        .holidayRDSpecial && (
+                                                        <td className="border-r bg-purple-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.nightDiffHolidayRDSpecial,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.nightDiff
+                                                        .holidayOT && (
+                                                        <td className="border-r bg-purple-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.nightDiffHolidayOT,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.nightDiff
+                                                        .holidayRestdayOT && (
+                                                        <td className="border-r bg-purple-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.nightDiffHolidayRestdayOT,
+                                                            )}
+                                                        </td>
+                                                    )}
+
+                                                    {/* Additional Premium Pay Columns - per-column visibility */}
+                                                    {premiumVisibility
+                                                        .additional.restday && (
+                                                        <td className="border-r bg-orange-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.additionalRestday,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility
+                                                        .additional
+                                                        .holidayRegular && (
+                                                        <td className="border-r bg-orange-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.additionalHolidayRegular,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility
+                                                        .additional
+                                                        .holidaySpecial && (
+                                                        <td className="border-r bg-orange-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.additionalHolidaySpecial,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility
+                                                        .additional
+                                                        .holidayRDRegular && (
+                                                        <td className="border-r bg-orange-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.additionalHolidayRDRegular,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility
+                                                        .additional
+                                                        .holidayRDSpecial && (
+                                                        <td className="border-r bg-orange-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.additionalHolidayRDSpecial,
+                                                            )}
+                                                        </td>
+                                                    )}
+
+                                                    {/* Overtime Pay Columns - per-column visibility */}
+                                                    {premiumVisibility.overtime
+                                                        .regularOT && (
+                                                        <td className="border-r bg-green-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.otRegular,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.overtime
+                                                        .restday && (
+                                                        <td className="border-r bg-green-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.otRestday,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.overtime
+                                                        .holidayRegular && (
+                                                        <td className="border-r bg-green-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.otHolidayRegular,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.overtime
+                                                        .holidaySpecial && (
+                                                        <td className="border-r bg-green-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.otHolidaySpecial,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.overtime
+                                                        .holidayRDRegular && (
+                                                        <td className="border-r bg-green-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.otHolidayRDRegular,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.overtime
+                                                        .holidayRDSpecial && (
+                                                        <td className="border-r bg-green-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.otHolidayRDSpecial,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    {premiumVisibility.overtime
+                                                        .ordinaryWorking && (
+                                                        <td className="border-r bg-green-50 p-2 text-right text-xs">
+                                                            {formatCurrency(
+                                                                payroll.otOrdinaryWorking,
+                                                            )}
+                                                        </td>
+                                                    )}
+                                                    <td className="border-r bg-yellow-50 p-2 text-right font-bold">
+                                                        {formatCurrency(
+                                                            payroll.totalPay,
+                                                        )}
+                                                    </td>
+
+                                                    {/* Deductions */}
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.sssDeduction,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.phicDeduction,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.hdmfDeduction,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.taxDeduction,
+                                                        )}
+                                                    </td>
+                                                    <td className="border-r p-2 text-right">
+                                                        {formatCurrency(
+                                                            payroll.loanDeduction,
+                                                        )}
+                                                    </td>
+
+                                                    {/* Net Pay */}
+                                                    <td className="bg-orange-50 p-2 text-right text-lg font-bold">
+                                                        {formatCurrency(
+                                                            payroll.netPay,
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </CardContent>
+                    </Card>
+                )}
+            </div>
+        </AppLayout>
+    );
+}
